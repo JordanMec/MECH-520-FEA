@@ -1,0 +1,137 @@
+% =========================================================================
+% MECH 520 - Finite Element Analysis
+% Homework 01 - Assembly and Direct Stiffness Method
+% 
+% This script performs finite element analysis (FEA) on a variable stiffness
+% prosthetic knee model. The system consists of 7 springs that can engage
+% under different force conditions.
+%
+% - Constructs the stiffness matrix for each case
+% - Solves for displacements (x1, x2, x3) for forces 100N, 400N, 1000N
+% - Fixes Node 4 (x4 = 0)
+% - Displays stiffness matrices and computed displacements
+%
+% =========================================================================
+clear; clc;
+
+% ==============================
+% STEP 1: DEFINE SPRING STIFFNESS
+% ==============================
+% Stiffness values (N/mm) for each spring
+k = [1000, 1000, 1000, 3000, 5000, 5000, 10000]; % k1 to k7
+
+% ==============================
+% STEP 2: DEFINE NODE CONNECTIONS
+% ==============================
+% Each row represents a spring connecting two nodes and its stiffness:
+% [Start Node, End Node, Stiffness]
+springs = [
+    1, 2, k(1);  % Spring 1 (Always engaged)
+    2, 3, k(2);  % Spring 2 (Always engaged)
+    2, 3, k(3);  % Spring 3 (Always engaged)
+    3, 3, k(4);  % Spring 4 (Hangs from Node 3, engages Node 2 in Case 2)
+    3, 4, k(5);  % Spring 5 (Always engaged)
+    3, 4, k(6);  % Spring 6 (Always engaged)
+    4, 4, k(7);  % Spring 7 (Hangs from Node 4, engages Node 3 in Case 3)
+];
+
+% ==============================
+% STEP 3: ASSEMBLE STIFFNESS MATRICES FOR EACH CASE
+% ==============================
+% Function to assemble stiffness matrix based on active springs
+assemble_stiffness = @(active_springs) assemble_global_stiffness(springs, active_springs);
+
+% Case 1: Exclude springs 4 and 7
+active_springs_C1 = [1, 2, 3, 5, 6]; 
+K_C1 = assemble_stiffness(active_springs_C1);
+
+% Case 2: Include spring 4, exclude spring 7
+active_springs_C2 = [1, 2, 3, 4, 5, 6]; 
+K_C2 = assemble_stiffness(active_springs_C2);
+
+% Case 3: Include all springs
+active_springs_C3 = [1, 2, 3, 4, 5, 6, 7];
+K_C3 = assemble_stiffness(active_springs_C3);
+
+% ==============================
+% STEP 4: DISPLAY STIFFNESS MATRICES
+% ==============================
+disp('Stiffness Matrix for Case 1:');
+disp(K_C1);
+
+disp('Stiffness Matrix for Case 2:');
+disp(K_C2);
+
+disp('Stiffness Matrix for Case 3:');
+disp(K_C3);
+
+% ==============================
+% STEP 5: DEFINE FORCE VECTOR
+% ==============================
+% Force values (N) applied at nodes
+forces = [100, 400, 1000];  % Forces applied at Node 2 and Node 3
+
+% ==============================
+% STEP 6: SOLVE FOR DISPLACEMENTS
+% ==============================
+% Solve for displacements with fixed Node 4
+disp_C1 = solve_displacements_fixed(K_C1, forces);
+disp_C2 = solve_displacements_fixed(K_C2, forces);
+disp_C3 = solve_displacements_fixed(K_C3, forces);
+
+% ==============================
+% STEP 7: DISPLAY DISPLACEMENTS
+% ==============================
+disp('Displacements for Case 1 (mm):');
+disp(disp_C1);
+
+disp('Displacements for Case 2 (mm):');
+disp(disp_C2);
+
+disp('Displacements for Case 3 (mm):');
+disp(disp_C3);
+
+% =========================================================================
+% FUNCTION: ASSEMBLE GLOBAL STIFFNESS MATRIX
+% =========================================================================
+function K = assemble_global_stiffness(springs, active_springs)
+    % Determine the number of nodes in the system
+    num_nodes = max(max(springs(:, 1:2)));  
+    K = zeros(num_nodes); % Initialize global stiffness matrix
+    
+    % Loop through active springs to assemble stiffness matrix
+    for i = active_springs
+        n1 = springs(i, 1);
+        n2 = springs(i, 2);
+        k_val = springs(i, 3);
+
+        % Add stiffness contributions to global matrix
+        K(n1, n1) = K(n1, n1) + k_val;
+        K(n2, n2) = K(n2, n2) + k_val;
+        K(n1, n2) = K(n1, n2) - k_val;
+        K(n2, n1) = K(n2, n1) - k_val;
+    end
+end
+
+% =========================================================================
+% FUNCTION: SOLVE FOR DISPLACEMENTS (NODE 4 FIXED)
+% =========================================================================
+function displacements = solve_displacements_fixed(K, forces)
+    num_nodes = size(K, 1);
+    F = zeros(num_nodes, 1);
+    F(2) = forces(1); % Force applied at node 2
+    F(3) = forces(2); % Force applied at node 3
+
+    % Remove rows and columns corresponding to the fixed node (Node 4)
+    fixed_node = 4;
+    active_dof = setdiff(2:num_nodes, fixed_node); % Exclude node 4
+    K_reduced = K(active_dof, active_dof);
+    F_reduced = F(active_dof);
+
+    % Solve for displacements using the reduced system
+    displacements_reduced = K_reduced \ F_reduced;
+
+    % Reconstruct the full displacement vector including the fixed node
+    displacements = zeros(num_nodes - 1, 1);
+    displacements(active_dof - 1) = displacements_reduced;
+end
