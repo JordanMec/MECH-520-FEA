@@ -1,0 +1,357 @@
+% -------------------------------------------------------------------------
+% FILE: Transient_AdvectionDiffusion_PM25.m
+% AUTHOR: Jordan Rice
+% DATE: April 11th, 2025
+% COURSE/PROJECT: MECH 520: FEA - Project Part 3
+%
+% DESCRIPTION:
+%   This script solves the 2D transient advection-diffusion equation to model
+%   the transport of PM2.5 (particulate matter) in a confined space (a "home")
+%   using the Finite Element Method (FEM) with Q4 (4-node bilinear) elements.
+%
+%   In this model, the scalar field u(x,y,t) represents the PM2.5 concentration.
+%   The strong form of the governing equation is:
+%
+%       ∂u/∂t + v · ∇u - ∇·(D ∇u) = 0     in Ω,
+%
+%   where:
+%       u(x,y,t)  = PM2.5 concentration (arbitrary units)
+%       v         = prescribed advection velocity,
+%       D         = diffusion coefficient,
+%       Ω         = the spatial domain (a 4 m by 1 m rectangle).
+%
+%   The corresponding variational (weak) formulation is:
+%
+%       Find u ∈ V such that for all test functions w ∈ V:
+%
+%         ∫_Ω w (∂u/∂t) dΩ + ∫_Ω w (v · ∇u) dΩ + ∫_Ω ∇w · (D ∇u) dΩ = 0.
+%
+%   The FEM approximation uses a Q4 (bilinear) element:
+%
+%       u(x,y,t) ≈ Σ N_i(x,y) u_i(t),
+%
+%   leading to the semi-discrete system:
+%
+%       M du/dt + A u + K u = f,
+%
+%   with the following matrix definitions:
+%
+%       M (Mass matrix)     M_ij = ∫_Ω N_i N_j dΩ,
+%       A (Advection matrix) A_ij = ∫_Ω N_i (v · ∇N_j) dΩ,
+%       K (Diffusion matrix) K_ij = ∫_Ω ∇N_i · (D ∇N_j) dΩ.
+%
+%   Time discretization is carried out using the Backward Euler scheme:
+%
+%       (M/dt + A + K) u^(n+1) = (M/dt) u^(n)
+%
+% BOUNDARY CONDITIONS:
+%   - Inlet (Forced): A small section on the left boundary (x = 0) for nodes 
+%     with y in [0.4, 0.6] is forced to a prescribed concentration, u = u_in,
+%     simulating a fan that forcefully injects polluted (bad) air into the space.
+%
+%   - Outlet (Passive): The right boundary (x = Lx) for nodes with y in [0.4, 0.6]
+%     is left passive (no Dirichlet condition) to allow the forced plume to 
+%     exit naturally by diffusion and advection (natural Neumann conditions).
+%
+% MESH:
+%   - A structured mesh is generated programmatically for a 4 m by 1 m domain.
+%   - Q4 (4-node) elements are defined with nodes ordered in a row-major, 
+%     counterclockwise fashion.
+%
+% VISUALIZATION:
+%   - Figure 1 displays the mesh along with element outlines, node numbers, 
+%     and DOF labels.
+%   - Figure 3 animates the transient evolution of PM2.5 concentration using a 
+%     surf plot (top-down view) with a color scale representing 0 (clean) to 
+%     1 (polluted). An annotation in Figure 3 identifies the forced inlet and 
+%     the passive outlet.
+%   - Figure 2 shows the final PM2.5 concentration field after the simulation.
+%
+% ASSUMPTIONS:
+%   - The velocity field is prescribed (constant v_adv) and does not evolve.
+%   - The scalar advection-diffusion model is linear and does not resolve 
+%     turbulent eddies; it represents the mean transport process.
+%
+% -------------------------------------------------------------------------
+
+clc; clear; close all;                           % Clear the command window, workspace, and close any open figure windows
+
+%% ----- User Parameters and Physical Data ----- %  % Section header for clarity
+
+% Domain dimensions [m]
+Lx = 4;                                         % Domain length in the x-direction in meters
+Ly = 1;                                         % Domain length in the y-direction in meters
+
+% Mesh parameters (for a structured mesh)
+nx = 10;                                        % Number of elements along the x-direction (controls resolution in x)
+ny = 5;                                         % Number of elements along the y-direction (controls resolution in y)
+
+% Diffusion coefficient for PM2.5 [m^2/s]
+D_diff = 1e-5;                                  % Diffusion coefficient (models molecular and turbulent diffusion)
+
+% Advection (forced velocity) [m/s] 
+v_inflow = 0.0833;                              % Inlet velocity magnitude; indicates the strength of the forced inlet (fan) [m/s]
+v_adv = [v_inflow; 0];                          % Advection velocity vector: (v_x, v_y) = (v_inflow, 0); flow purely in x-direction
+
+% Time stepping parameters
+dt = 1;                                         % Time step size in seconds
+t_end = 240;                                    % Total simulation time in seconds (4 minutes)
+n_steps = round(t_end/dt);                      % Calculate the total number of time steps
+
+% Boundary Conditions for the concentration field u(x,y,t) [arbitrary units]
+u_in = 1;                                       % Inlet concentration (representing polluted air) at the forced inlet
+u_out = 0;                                      % Outlet concentration is not explicitly prescribed (passive outlet, natural Neumann)
+                                                % (u_out is not used since the outlet is passive)
+% Initial condition: clean air throughout the domain
+u0 = 0;                                         % Initial concentration value (clean air)
+
+%% ----- Mesh Generation (Programmatically) ----- %  % Section for mesh creation
+
+% Generate a structured Q4 mesh for a rectangular domain using meshgrid
+[X, Y] = meshgrid(linspace(0, Lx, nx+1), linspace(0, Ly, ny+1));  % Create grid points: evenly spaced in x and y
+COORDS = [reshape(X', [], 1), reshape(Y', [], 1)];  % Reshape grid matrices into a list of nodal coordinates (each row: [x, y]); 
+                                                    % The transpose (X') forces row-major ordering so that connectivity is consistent
+n_nodes = size(COORDS, 1);                        % Total number of nodes is the number of rows in COORDS
+
+% Build the element connectivity matrix for Q4 (4-node quadrilateral) elements
+ELEMS = zeros(nx*ny, 4);                          % Preallocate the element connectivity matrix (each row contains 4 node indices)
+el = 1;                                         % Initialize element counter
+for j = 1:ny                                    % Loop over rows (elements in y-direction)
+    for i = 1:nx                                % Loop over columns (elements in x-direction)
+        n1 = (j-1)*(nx+1) + i;                  % Compute index of bottom-left node of the element
+        n2 = n1 + 1;                            % Bottom-right node index (next node in the row)
+        n3 = n2 + (nx+1);                       % Top-right node index (offset by one full row)
+        n4 = n1 + (nx+1);                       % Top-left node index (same as n1 offset by one full row)
+        ELEMS(el,:) = [n1, n2, n3, n4];          % Store the four node indices (ordered counterclockwise)
+        el = el + 1;                            % Increment element counter
+    end
+end
+n_el = size(ELEMS, 1);                          % Total number of elements
+
+% For a scalar field (PM2.5 concentration) we have 1 DOF per node:
+n_dof = n_nodes;                                % Total degrees of freedom equals the number of nodes
+
+%% ----- Figure 1: Plot Mesh with Element, Node, and DOF Labels ----- %  % First figure to verify mesh quality
+figure;                                         % Create new figure window
+set(gcf, 'Position', [100, 100, 800, 800]);      % Set figure window position and size
+axis equal; hold on;                            % Set axis scaling equal and hold on to overlay multiple plots
+title('Figure 1: Mesh with Element, Node, and DOF Labels');  % Title for the mesh plot
+xlabel('x [m]'); ylabel('y [m]');               % Label x and y axes with units
+
+% Plot each element with red edges
+for el = 1:n_el                                % Loop over each element
+    el_coords = COORDS(ELEMS(el, :), :);         % Extract coordinates for the current element's nodes
+    patch('Faces', [1 2 3 4], 'Vertices', el_coords, ...  % Draw quadrilateral element using patch
+          'FaceColor', 'none', 'EdgeColor', 'red', 'LineWidth', 1.5);  % No face color, red edge, line width 1.5
+    x_ave = mean(el_coords(:,1));               % Compute x-coordinate of element centroid
+    y_ave = mean(el_coords(:,2));               % Compute y-coordinate of element centroid
+    text(x_ave, y_ave, num2str(el), ...         % Place text at the centroid with the element number
+         'Color', 'blue', 'FontSize', 10, 'FontWeight', 'bold');  % Blue bold font, size 10
+end
+
+% Plot each node with its node number
+for i = 1:n_nodes                            % Loop over each node
+    plot(COORDS(i,1), COORDS(i,2), 'ko', ...   % Plot node as a black circle ('ko')
+         'MarkerFaceColor', 'green', 'MarkerSize', 6);  % Fill circle with green, size 6
+    text(COORDS(i,1)+0.05, COORDS(i,2)+0.05, ... % Place text near each node, offset by 0.05 m
+         sprintf('Node %d', i), 'FontSize', 8, 'Color', 'magenta');  % Text shows node number, magenta color
+end
+hold off;                                     % Release hold on the figure
+
+%% ----- Assembly of Global Matrices ----- %  % Assemble finite element matrices for the transient problem
+
+% The governing equation is: 
+%      ∂u/∂t + v_adv·∇u - ∇·(D_diff∇u) = 0                (1)
+%
+% Weak form: Multiply by test function and integrate:
+%      ∫_Ω w (∂u/∂t) dΩ + ∫_Ω w (v_adv·∇u) dΩ + ∫_Ω ∇w·(D_diff ∇u)dΩ = 0
+%
+% Finite Element discretization:
+%      u(x,y,t) ≈ ∑ N_i(x,y) u_i(t) 
+% which leads to the semi-discrete system:
+%      M (du/dt) + A u + K u = 0,
+%
+% where
+%      M_ij = ∫_Ω N_i N_j dΩ  -- mass matrix,
+%      A_ij = ∫_Ω N_i (v_adv·∇N_j) dΩ  -- advection matrix,
+%      K_ij = ∫_Ω ∇N_i · (D_diff ∇N_j) dΩ  -- diffusion (stiffness) matrix.
+%
+% Using Backward Euler in time:
+%      (M/dt + A + K) u^(n+1) = (M/dt) u^(n)
+
+M_global = zeros(n_dof);                       % Initialize global mass matrix M
+K_global = zeros(n_dof);                       % Initialize global diffusion (stiffness) matrix K
+A_global = zeros(n_dof);                       % Initialize global advection matrix A
+f_global = zeros(n_dof, 1);                    % Global force vector (f = 0 since no volumetric source)
+
+% Gauss quadrature settings: 2x2 integration (exact for bilinear functions)
+W = [1, 1];                                    % Gauss weights for 2-point integration in each direction
+GP = [-1/sqrt(3), 1/sqrt(3)];                    % Gauss points in the parent element coordinates
+
+for el = 1:n_el                               % Loop over each element
+    % Extract the coordinates for the current element's 4 nodes
+    coords = zeros(4,2);                      % Preallocate 4x2 array for nodal coordinates
+    for node = 1:4                           % For each node in the element
+        coords(node,:) = COORDS(ELEMS(el,node),:);  % Get the physical coordinates from COORDS
+    end
+    
+    % Initialize local matrices for the element (4x4 matrices)
+    M_loc = zeros(4);                         % Local mass matrix
+    K_loc = zeros(4);                         % Local diffusion matrix
+    A_loc = zeros(4);                         % Local advection matrix
+    
+    % Loop over the Gauss points for numerical integration (2x2 quadrature)
+    for i = 1:2                             % Loop over Gauss points in xi direction
+        for j = 1:2                         % Loop over Gauss points in eta direction
+            xi = GP(i);                     % Current Gauss point coordinate in xi
+            eta = GP(j);                    % Current Gauss point coordinate in eta
+            
+            % Evaluate Q4 shape functions at (xi, eta)
+            N = [1/4*(1-xi)*(1-eta);        % Shape function for node 1
+                 1/4*(1+xi)*(1-eta);        % Shape function for node 2
+                 1/4*(1+xi)*(1+eta);        % Shape function for node 3
+                 1/4*(1-xi)*(1+eta)];       % Shape function for node 4
+            
+            % Compute derivatives of the shape functions w.r.t. xi
+            dN_dxi = [1/4*(eta-1);           % dN1/dxi
+                      1/4*(1-eta);           % dN2/dxi
+                      1/4*(eta+1);           % dN3/dxi
+                      1/4*(-eta-1)];         % dN4/dxi
+            
+            % Compute derivatives of the shape functions w.r.t. eta
+            dN_deta = [1/4*(xi-1);           % dN1/deta
+                       1/4*(-xi-1);          % dN2/deta
+                       1/4*(xi+1);           % dN3/deta
+                       1/4*(1-xi)];          % dN4/deta
+            
+            % Form the derivative matrix in the parameter (reference) domain (2x4)
+            dN_dparam = [dN_dxi'; dN_deta'];   % First row: dN/dxi; second row: dN/deta
+            
+            % Compute the Jacobian matrix (2x2): J = dN_dparam * coords
+            J_el = dN_dparam * coords;          % Maps from reference coordinates to physical coordinates
+            detJ = det(J_el);                   % Jacobian determinant (scale factor for integration)
+            if detJ <= 0                       % Check for degenerate or inverted elements
+                error('Non-positive Jacobian detected in element %d', el);
+            end
+            J_inv = inv(J_el);                  % Inverse of the Jacobian matrix
+            
+            % Compute derivatives of shape functions in physical space: dN_dx = J_inv * dN_dparam
+            dN_dx = J_inv * dN_dparam;          % (2x4) matrix, where each column is [dN/dx; dN/dy] for a node
+            
+            % Compute the local mass matrix contribution: M_loc += (N * N') * detJ * weight
+            M_loc = M_loc + (N * N') * detJ * W(i) * W(j);
+            
+            % Compute the local diffusion matrix contribution:
+            % Sum over the contributions from the x and y derivatives (dot product) times D_diff
+            for a = 1:4
+                for b = 1:4
+                    K_loc(a,b) = K_loc(a,b) + (dN_dx(1,a)*dN_dx(1,b) + dN_dx(2,a)*dN_dx(2,b)) ...
+                                 * D_diff * detJ * W(i) * W(j);
+                end
+            end
+            
+            % Compute the local advection matrix contribution:
+            % For each pair of nodes, multiply N(a) by (v_adv dot gradN(b))
+            for a = 1:4
+                for b = 1:4
+                    adv_val = v_adv(1)*dN_dx(1,b) + v_adv(2)*dN_dx(2,b);  % Dot product (v_adv · ∇N_b)
+                    A_loc(a,b) = A_loc(a,b) + N(a) * adv_val * detJ * W(i) * W(j);
+                end
+            end
+        end
+    end
+    
+    % Assemble the global matrices by adding the element contributions
+    global_dofs = ELEMS(el, :);              % For a scalar problem, DOF indices equal node indices for this element
+    M_global(global_dofs, global_dofs) = M_global(global_dofs, global_dofs) + M_loc;  % Add local mass matrix
+    K_global(global_dofs, global_dofs) = K_global(global_dofs, global_dofs) + K_loc;  % Add local diffusion matrix
+    A_global(global_dofs, global_dofs) = A_global(global_dofs, global_dofs) + A_loc;  % Add local advection matrix
+    % f_global remains zero (no distributed source)
+end
+
+%% ----- Define Boundary Conditions ----- %  % Specify which nodes have prescribed concentration
+% In our forced inlet / passive outlet model, we impose a Dirichlet condition (u = u_in) 
+% on the inlet (left wall for nodes with y in [0.4, 0.6]). The outlet on the right is passive.
+fixed_nodes = [];                           % Initialize list for nodes with fixed (Dirichlet) boundary conditions
+u_fixed = [];                               % Initialize list for prescribed concentration values at fixed nodes
+
+tol = 1e-6;                                 % Tolerance for floating point comparison in coordinate values
+
+% Identify inlet nodes: nodes on the left boundary (x = 0) and with 0.4 <= y <= 0.6
+left_nodes = find(abs(COORDS(:,1)) < tol);   % Find nodes with x approximately 0
+for i = 1:length(left_nodes)
+    node = left_nodes(i);                   % Current node from left boundary
+    if COORDS(node,2) >= 0.4 && COORDS(node,2) <= 0.6  % Check if y is within [0.4, 0.6]
+        fixed_nodes(end+1) = node;          % Add this node to the fixed nodes list
+        u_fixed(end+1) = u_in;              % Prescribe u_in at these nodes (forced inlet)
+    end
+end
+% Note: No fixed condition is imposed on the right boundary to simulate a passive outlet
+
+%% ----- Initial Condition ----- %  % Set initial concentration everywhere in the domain
+u = zeros(n_dof,1);                         % Set all DOF values to zero (clean air)
+
+%% ----- Time-Stepping Using Backward Euler ----- %  % Solve the transient problem
+% The time-discrete form is: (M_global/dt + A_global + K_global) * u^(n+1) = (M_global/dt)*u^(n)
+systemMatrix = M_global/dt + A_global + K_global;  % Assemble system matrix for Backward Euler
+
+%% ----- Prepare Figures for Visualization -----
+
+% Create grid for visualization (matching the nodal layout)
+[X_grid, Y_grid] = meshgrid(linspace(0, Lx, nx+1), linspace(0, Ly, ny+1));  % Create grid matching mesh nodes
+
+% Figure 3: Transient Simulation using surf
+figure;                                       % Open a new figure for the transient simulation
+title('Figure 3: Transient PM_{2.5} Concentration Evolution');  % Figure title
+xlabel('x [m]');                              % Label x-axis in meters
+ylabel('y [m]');                              % Label y-axis in meters
+colormap('jet');                              % Use jet colormap (changes colors based on values)
+cb = colorbar;                                % Add colorbar to display concentration scale
+ylabel(cb, 'PM_{2.5} Concentration [arb. units]');  % Label the colorbar with units
+axis([0 Lx 0 Ly]);                            % Set axis limits to domain dimensions
+axis equal;                                   % Ensure scaling is equal along both axes
+clim([0 1]);                                 % Set color axis limits (0 = clean, 1 = polluted)
+% Add an annotation textbox to indicate boundary conditions
+annotation('textbox',[0.15 0.92 0.35 0.05], 'String', ...
+    sprintf('Inlet (x=0, y in [0.4,0.6]): Forced, u = %.2f   (Outlet passive)', u_in), ...
+    'FitBoxToText','on','BackgroundColor','white','EdgeColor','none','FontSize',10);
+
+% Use surf for a full-field, smoothly colored plot; view(2) gives a top-down view
+hSim = surf(X_grid, Y_grid, reshape(u, ny+1, nx+1), 'EdgeColor', 'none');  % Create a surface plot
+view(2);                                      % Set view to 2D (top-down)
+shading interp;                               % Interpolate colors between vertices for a smooth look
+drawnow;                                      % Update figure immediately
+
+%% ----- Time-Stepping Loop -----
+for n = 1:n_steps                          % Loop over each time step
+    rhs = (M_global/dt) * u;                % Compute the right-hand side: (M/dt)*u^n (since there's no source)
+    
+    % Apply Dirichlet (forced) boundary conditions at the inlet nodes
+    A_mod = systemMatrix;                   % Make a copy of the system matrix for modification
+    for i = 1:length(fixed_nodes)            % Loop over each fixed node (inlet nodes)
+        node = fixed_nodes(i);              % Current fixed node
+        A_mod(node, :) = 0;                 % Zero out the entire row corresponding to the fixed DOF
+        A_mod(node, node) = 1;              % Set the diagonal entry to 1 for the fixed DOF
+        rhs(node) = u_fixed(i);             % Set the right-hand side to the prescribed value at that node (u_in)
+    end
+    
+    % Solve the linear system to update the concentration at the next time step
+    u_new = A_mod \ rhs;                    % Solve (M/dt + A + K)*u^(n+1) = (M/dt)*u^n for u^(n+1)
+    u = u_new;                              % Update the solution
+    
+    % Update the surf plot (Figure 3) with the new concentration field
+    set(hSim, 'ZData', reshape(u, ny+1, nx+1));  % Update the z-data of the surface plot to the current u values
+    title(sprintf('Figure 3: PM_{2.5} Concentration at t = %d s', n*dt));  % Update the title with current time
+    drawnow;                                % Force MATLAB to render the updated plot immediately
+    pause(0.01);                            % Pause briefly to control animation speed
+end
+
+%% ----- Figure 2: Final PM2.5 Concentration Field ----- %  % Plot the final concentration field
+figure;                                       % Open new figure window for final field plot
+surf(X_grid, Y_grid, reshape(u, ny+1, nx+1), 'EdgeColor', 'none');  % Create a surface plot of final u
+view(2); shading interp; colorbar;             % Set to 2D view and interpolate colors smoothly; add a colorbar
+axis equal; xlabel('x [m]'); ylabel('y [m]');    % Set axis labels and equal scaling
+title('Figure 2: Final PM_{2.5} Concentration Field');  % Title for the final concentration field plot
+cb2 = colorbar;                               % Add a second colorbar
+ylabel(cb2, 'PM_{2.5} Concentration [arb. units]');  % Label the colorbar
+clim([0 1]);                                 % Set the color axis limits to match the representative concentrations
