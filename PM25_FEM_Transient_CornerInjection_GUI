@@ -1,0 +1,210 @@
+%% PM25_FEM_Transient_CornerInjection_GUI_modified.m
+% AUTHOR: ChatGPT (Adapted from Jordan Rice)
+% DATE: April 16, 2025
+
+%% Pre-execution Cleanup
+close all; clear; clc;
+
+%% GUI: Select Mesh Refinement Level
+options = {'Coarse (4x)', 'Medium (6x)', 'Fine (16x)', 'Extra Fine (32x)'};
+[idx, tf] = listdlg('PromptString', 'Select mesh refinement level:', ...
+                     'SelectionMode', 'single', ...
+                     'ListString', options);
+if tf == 0
+    disp('No selection was made. Exiting.');
+    return;
+end
+switch idx
+    case 1, totalFactor = 4;
+    case 2, totalFactor = 6;
+    case 3, totalFactor = 16;
+    case 4, totalFactor = 32;
+end
+multiplier = sqrt(totalFactor);
+base_nx = 10; base_ny = 5;
+nx = round(base_nx * multiplier);
+ny = round(base_ny * multiplier);
+fprintf('Mesh refinement selected: %s\n', options{idx});
+fprintf('Refined mesh: nx = %d, ny = %d\n', nx, ny);
+
+%% GUI: Physics Controls
+hControlFig = figure('Name','Physics Controls','NumberTitle','off', ...
+    'Position',[100 100 300 200]);
+hDiffusion = uicontrol('Style','checkbox','String','Enable Diffusion', 'Position',[20 140 200 30],'Value',1);
+hAdvection = uicontrol('Style','checkbox','String','Enable Advection','Position',[20 100 200 30],'Value',1);
+hTurbMixing = uicontrol('Style','checkbox','String','Enable Turbulent Mixing','Position',[20 60 200 30],'Value',1);
+hRun = uicontrol('Style','pushbutton','String','Run Simulation','Position',[80 20 140 30],'Callback', @(~,~) uiresume(gcbf));
+uiwait(hControlFig);
+flag_diffusion = get(hDiffusion, 'Value');
+flag_advection = get(hAdvection, 'Value');
+flag_turbulent = get(hTurbMixing, 'Value');
+close(hControlFig);
+
+%% Parameter Setup
+default_D_diff = 1e-5; default_D_turb = 1e-3; default_v_inflow = 0.0833/8;
+if ~flag_diffusion
+    D_diff = 0; D_turb = 0;
+elseif ~flag_turbulent
+    D_diff = default_D_diff; D_turb = 0;
+else
+    D_diff = default_D_diff; D_turb = default_D_turb;
+end
+if ~flag_advection
+    v_inflow = 0;
+else
+    v_inflow = default_v_inflow;
+end
+D_eff = D_diff + D_turb;
+
+%% Domain & Temporal Parameters
+Lx = 4; Ly = 1; dt = 20; t_end = 5000;
+n_steps = round(t_end/dt);
+u_in = 500.4; injection_duration = 60;
+
+%% Jet–Stream Effect Parameter
+jet_factor = 8;
+
+%% Mesh Generation
+alpha = 2;
+xi = linspace(0,1,nx+1);
+x_coords = Lx * (exp(alpha*xi) - 1)/(exp(alpha)-1);
+y_coords = linspace(0, Ly, ny+1);
+[X, Y] = meshgrid(x_coords, y_coords);
+COORDS = [reshape(X',[],1), reshape(Y',[],1)];
+n_nodes = size(COORDS,1);
+
+elems = zeros(nx*ny,4);
+el = 1;
+for j = 1:ny
+    for k = 1:nx
+        n1 = (j-1)*(nx+1) + k;
+        n2 = n1 + 1;
+        n3 = n2 + (nx+1);
+        n4 = n1 + (nx+1);
+        elems(el,:) = [n1,n2,n3,n4];
+        el = el + 1;
+    end
+end
+
+%% Inlet & Exhaust Nodes
+tol = 1e-8;
+leftWall = find(abs(COORDS(:,1))<tol);
+[~, sidx] = sort(abs(COORDS(leftWall,2)-Ly/2));
+inlet_nodes = leftWall(sidx(1:2));
+corners = [0 0; Lx 0; Lx Ly; 0 Ly];
+exhaust_nodes = zeros(4,1);
+for m = 1:4
+    exhaust_nodes(m) = find(abs(COORDS(:,1)-corners(m,1))<tol & abs(COORDS(:,2)-corners(m,2))<tol);
+end
+
+%% Figure 1: Mesh Visualization
+figure('Position',[100 100 800 800]);
+axis equal; hold on;
+title('Mesh with Inlet and Exhaust','Interpreter','latex');
+xlabel('$x$ [m]','Interpreter','latex'); ylabel('$y$ [m]','Interpreter','latex');
+for e=1:size(elems,1)
+    c = COORDS(elems(e,:),:);
+    patch('Faces',[1 2 3 4],'Vertices',c,'FaceColor','none','EdgeColor','red');
+end
+plot(COORDS(:,1),COORDS(:,2),'ko','MarkerFaceColor','green');
+for n=inlet_nodes'; plot(COORDS(n,1),COORDS(n,2),'r*','MarkerSize',12); end
+for n=exhaust_nodes'; plot(COORDS(n,1),COORDS(n,2),'bo','MarkerSize',10); end
+hold off;
+
+%% FEM Assembly
+n_dof = n_nodes;
+M_global = zeros(n_dof); K_global = zeros(n_dof); A_global = zeros(n_dof);
+GP = [-1/sqrt(3),1/sqrt(3)]; W = [1,1];
+for e = 1:size(elems,1)
+    coords = COORDS(elems(e,:),:);
+    M_loc = zeros(4); K_loc = zeros(4); A_loc = zeros(4);
+    for i1=1:2
+        for j1=1:2
+            xi_pt=GP(i1); eta_pt=GP(j1);
+            N = 1/4*[(1-xi_pt)*(1-eta_pt);
+                     (1+xi_pt)*(1-eta_pt);
+                     (1+xi_pt)*(1+eta_pt);
+                     (1-xi_pt)*(1+eta_pt)];
+            dNdxi = 1/4*[-(1-eta_pt); (1-eta_pt); (1+eta_pt); -(1+eta_pt)];
+            dNdeta= 1/4*[-(1-xi_pt); -(1+xi_pt); (1+xi_pt); (1-xi_pt)];
+            J = [dNdxi'; dNdeta'] * coords;
+            invJ = inv(J); detJ = det(J);
+            dNdx = invJ * [dNdxi'; dNdeta'];
+            M_loc = M_loc + (N*N')*detJ*W(i1)*W(j1);
+            for a=1:4
+                for b=1:4
+                    diff_term = (dNdx(1,a)*dNdx(1,b) + dNdx(2,a)*dNdx(2,b))*D_eff;
+                    adv_term = v_inflow * dNdx(1,b);
+                    K_loc(a,b) = K_loc(a,b) + diff_term*detJ*W(i1)*W(j1);
+                    A_loc(a,b) = A_loc(a,b) + N(a)*adv_term*detJ*W(i1)*W(j1);
+                end
+            end
+        end
+    end
+    idxs = elems(e,:);
+    M_global(idxs,idxs) = M_global(idxs,idxs) + M_loc;
+    K_global(idxs,idxs) = K_global(idxs,idxs) + K_loc;
+    A_global(idxs,idxs) = A_global(idxs,idxs) + A_loc;
+end
+K_pure = K_global * (default_D_diff/(default_D_diff+default_D_turb));
+
+%% Figure 2: Transient PM2.5 Field (3D)
+cmin = 0; cmax = 500.4;
+figure;
+hSim = surf(X, Y, zeros(size(X)), 'EdgeColor','none');
+title('$\mathrm{Transient\,PM}_{2.5}\,Field$', 'Interpreter','latex');
+xlabel('$x$ [m]','Interpreter','latex'); ylabel('$y$ [m]','Interpreter','latex');
+colormap('jet'); cb = colorbar; ylabel(cb,'$\mathrm{PM}_{2.5}\,[\mu g/m^3]$','Interpreter','latex');
+caxis([cmin cmax]); view(3); shading interp; rotate3d on;
+% fix z-axis limits so dynamic updates remain visible
+zlim([cmin cmax]);
+
+%% Time Integration Loop
+u = zeros(n_dof,1);
+for n = 1:n_steps
+    t = n * dt;
+    if t <= injection_duration
+        LHS = (M_global/dt + 0.5*(A_global+K_global));
+        RHS = (M_global/dt - 0.5*(A_global+K_global)) * u;
+        for m = inlet_nodes'
+            LHS(m,:) = 0; LHS(m,m) = 1;
+            RHS(m) = u_in + jet_factor * v_inflow;
+        end
+    else
+        LHS = (M_global/dt + 0.5*K_pure);
+        RHS = (M_global/dt - 0.5*K_pure) * u;
+    end
+    for m = exhaust_nodes'
+        LHS(m,:) = 0; LHS(m,m) = 1; RHS(m)=0;
+    end
+    u = LHS \ RHS;
+    set(hSim,'ZData',reshape(u, size(X)));
+    title(sprintf('\\mathrm{Transient\\,PM}_{2.5}\\,t=%d\\,s',t),'Interpreter','latex');
+    caxis([cmin cmax]); drawnow; pause(0.05);
+end
+
+%% Figure 3: Streamline Plot of Modified Velocity Field
+% Build the modified velocity field (same as before)
+U = v_inflow * ones(size(X)); V = zeros(size(Y)); A_suction = 0.1; eps = 1e-4;
+for j = 1:4
+    dx = X - corners(j,1);
+    dy = Y - corners(j,2);
+    U = U - A_suction * dx ./ (dx.^2 + dy.^2 + eps);
+    V = V - A_suction * dy ./ (dx.^2 + dy.^2 + eps);
+end
+% Apply jet-strength enhancement at inlet nodes
+jet_nodes = find(COORDS(:,1) < 0.05 * Lx);
+for k = 1:length(jet_nodes)
+    [r, c] = ind2sub(size(X), jet_nodes(k));
+    U(r, c) = U(r, c) * jet_factor;
+end
+
+% Plot: disable autoscaling so arrows reflect true magnitudes
+figure;
+quiver(X, Y, U, V, 0, 'LineWidth', 1.2);
+title('$\mathrm{Modified\ Flow\ Field\ with\ Jet\ &\ Exhaust}$','Interpreter','latex');
+xlabel('$x$ [m]','Interpreter','latex');
+ylabel('$y$ [m]','Interpreter','latex');
+axis([0 Lx 0 Ly]);
+axis equal tight;
+grid on;
