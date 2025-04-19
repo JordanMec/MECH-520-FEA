@@ -1,0 +1,121 @@
+%% ---------------------------------------------------------------------------
+%  PM2.5 Transport – GUI‑driven 2‑D transient model (sealed after jet phase)
+%  Visuals: rainbow plot title now shows simulation clock **and** jet status
+%           ("JET ON" during injection, "JET OFF" afterwards).
+% ---------------------------------------------------------------------------
+%  Updated: 18‑Apr‑2025
+%% ---------------------------------------------------------------------------
+
+close all; clear; clc;
+
+%% ───────────────────── Mesh refinement dialog ───────────────────────────────
+opts = {'Coarse (32×)','Medium (64×)','Fine (128×)','Extra‑Fine (256×)'};
+[idx, ok] = listdlg('PromptString','Select mesh refinement:', ...
+                    'SelectionMode','single','ListString',opts);
+if ~ok, return; end
+ref_nx = [32 64 128 256]; ratio_xy = 4;
+nx = ref_nx(idx); ny = nx/ratio_xy;
+
+%% ───────────────────── Physics + run‑time dialog ─────────────────────────────
+figPhys = figure('Name','Run settings','NumberTitle','off','Position',[120 120 380 230]);
+chkDiff = uicontrol('Style','checkbox','String','Enable diffusion',  'Position',[20 180 200 25],'Value',1);
+chkAdv  = uicontrol('Style','checkbox','String','Enable advection',  'Position',[20 150 200 25],'Value',1);
+chkTurb = uicontrol('Style','checkbox','String','Enable turbulence', 'Position',[20 120 200 25],'Value',1);
+
+uicontrol('Style','text','String','Total time  [s]:','Position',[20 85 100 20],'Horiz','left');
+edit_tend = uicontrol('Style','edit','Position',[130 85 60 22],'String','1000');
+
+uicontrol('Style','text','String','Jet duration [s]:','Position',[20 55 100 20],'Horiz','left');
+edit_tjet = uicontrol('Style','edit','Position',[130 55 60 22],'String','20');
+
+uicontrol('Style','text','String','dt (time‑step) [s]:','Position',[20 25 100 20],'Horiz','left');
+edit_dt   = uicontrol('Style','edit','Position',[130 25 60 22],'String','1');
+
+uicontrol('Style','pushbutton','String','Run','Position',[280 20 80 30], ...
+          'Callback',@(s,e)uiresume(gcbf));
+uiwait(figPhys);
+
+flag_diff = get(chkDiff,'Value');
+flag_adv  = get(chkAdv ,'Value');
+flag_turb = get(chkTurb,'Value');
+
+t_end   = str2double(get(edit_tend,'String'));
+inj_dur = str2double(get(edit_tjet,'String'));
+dt      = str2double(get(edit_dt ,'String'));
+if isnan(t_end)||isnan(inj_dur)||isnan(dt)||dt<=0||t_end<=0, error('Bad inputs.'); end
+close(figPhys);
+
+n_steps = ceil(t_end/dt);
+
+%% ───────────────────── Constants --------------------------------------------
+D_diff0=1e-5; D_turb0=1e-3; v0=0.5; jet_conc=500.4; slot_w=0.10; tau_turb=120; cut_frac=1e-4;
+
+v_inflow = flag_adv*v0; D_turb0=flag_turb*D_turb0; D_diff=flag_diff*D_diff0; D_eff0=D_diff+D_turb0;
+Lx=4; Ly=1; u_amb=0;
+
+%% ───────────────────── Mesh ---------------------------------------------------
+dx=Lx/nx; xv=0:dx:Lx; yv=0:dx:Ly; [X,Y]=meshgrid(xv,yv);
+COORDS=[reshape(X.',[],1),reshape(Y.',[],1)]; n_nodes=size(COORDS,1);
+
+elems=[]; nodeMat=reshape(1:(nx+1)*(ny+1),nx+1,ny+1).';
+for j=1:ny, for i=1:nx, n1=nodeMat(j,i); elems=[elems; n1 n1+1 n1+nx+2 n1+nx+1]; end, end
+
+slot_tol=1e-8;
+inlet_nodes=find(abs(COORDS(:,1))<slot_tol & abs(COORDS(:,2)-Ly/2)<=slot_w/2+slot_tol);
+corner=[0 0;Lx 0;Lx Ly;0 Ly];
+exhaust_nodes=arrayfun(@(c)find(abs(COORDS(:,1)-corner(c,1))<slot_tol & abs(COORDS(:,2)-corner(c,2))<slot_tol),1:4)';
+
+%% ───────────────────── Sparse FEM assembly -----------------------------------
+Mg=sparse(n_nodes,n_nodes); Kg=Mg; Ag=Mg; GP=[-1 1]/sqrt(3); W=[1 1];
+for e=1:size(elems,1)
+  idx=elems(e,:); cr=COORDS(idx,:); Ml=zeros(4); Kl=Ml; Al=Ml;
+  for a=1:2, for b=1:2
+    xi=GP(a); eta=GP(b);
+    N=0.25*[(1-xi)*(1-eta);(1+xi)*(1-eta);(1+xi)*(1+eta);(1-xi)*(1+eta)];
+    dNxi =0.25*[-(1-eta);(1-eta);(1+eta);-(1+eta)];
+    dNeta=0.25*[-(1-xi);-(1+xi);(1+xi);(1-xi)];
+    J=[dNxi';dNeta']*cr; detJ=det(J); invJ=inv(J); dN=invJ*[dNxi';dNeta'];
+    Ml=Ml+(N*N')*detJ*W(a)*W(b);
+    for p=1:4, for q=1:4
+      Kl(p,q)=Kl(p,q)+(dN(1,p)*dN(1,q)+dN(2,p)*dN(2,q))*D_eff0*detJ*W(a)*W(b);
+      Al(p,q)=Al(p,q)+N(p)*(v_inflow*dN(1,q))*detJ*W(a)*W(b); end, end
+  end, end
+  Mg(idx,idx)=Mg(idx,idx)+Ml; Kg(idx,idx)=Kg(idx,idx)+Kl; Ag(idx,idx)=Ag(idx,idx)+Al;
+end
+
+%% ───────────────────── Concentration surface ---------------------------------
+figConc=figure('Name','PM2.5 field'); Surf=surf(X,Y,zeros(size(X)),'EdgeColor','none');
+hold on; plot3(COORDS(inlet_nodes,1),COORDS(inlet_nodes,2),jet_conc*1.05*ones(size(inlet_nodes)),'r*'); hold off;
+colormap jet; colorbar; caxis([0 jet_conc]); view(3); shading interp; zlim([0 jet_conc]); pbaspect([1 1 0.3]);
+statusStr = 'JET ON'; ttl=title(sprintf('PM_{2.5} Field – t = 0 s – %s',statusStr));
+
+%% ───────────────────── Time loop ---------------------------------------------
+node_area=sum(Mg,2); domain_mass=zeros(n_steps,1); u=zeros(n_nodes,1);
+for n=1:n_steps
+  t=(n-1)*dt;
+  jet_phase = t < inj_dur - eps;   % logical flag for status
+  if jet_phase, D_turb=D_turb0; v_eff=v_inflow; statusStr='JET ON';
+  else,        D_turb=D_turb0*exp(-(t-inj_dur)/tau_turb); if D_turb/D_turb0<cut_frac, D_turb=0; end
+               v_eff=0; statusStr='JET OFF'; end
+  D_eff=D_diff+D_turb; Kg_now=Kg*(D_eff/max(D_eff0,eps));
+  if v_eff>0, Ag_now=Ag*(v_eff/v_inflow); else, Ag_now=sparse(n_nodes,n_nodes); end
+  LHS=Mg/dt+0.5*(Ag_now+Kg_now); RHS=(Mg/dt-0.5*(Ag_now+Kg_now))*u;
+  LHS(inlet_nodes,:)=0; LHS(sub2ind(size(LHS),inlet_nodes,inlet_nodes))=1;
+  RHS(inlet_nodes)=jet_phase*jet_conc + (~jet_phase)*u_amb;
+  if jet_phase
+    LHS(exhaust_nodes,:)=0; LHS(sub2ind(size(LHS),exhaust_nodes,exhaust_nodes))=1; RHS(exhaust_nodes)=u_amb;
+  end
+  u=LHS\RHS; domain_mass(n)=node_area'*u;  if mod(n,10)==1 || n==n_steps
+    if isgraphics(Surf) && isgraphics(ttl)
+        set(Surf,'ZData',reshape(u,nx+1,ny+1)');
+        set(ttl,'String',sprintf('PM_{2.5} Field – t = %.0f s – %s',t,statusStr));
+        drawnow;
+    end
+  end
+end
+%% mass plot
+figure('Name','Domain mass');
+plot((0:n_steps-1)*dt, domain_mass, 'LineWidth', 1.4);
+xlabel('Time [s]');
+ylabel('Total PM_{2.5} mass [arb]');
+grid on;
