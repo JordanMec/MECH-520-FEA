@@ -53,23 +53,19 @@ end
 
 %% Plot 1: L2 Error vs Mesh Size (log-log)
 h = 1 ./ meshSizes(2:end);
-valid_idx = ~isnan(L2errors);~isnan(L2errors);
+valid_idx = ~isnan(L2errors);
 
+figure;
 if sum(valid_idx) >= 2
     p = polyfit(log(h(valid_idx)), log(L2errors(valid_idx)), 1);
     convRate = p(1);
-else
-    convRate = NaN;
-end
-
-figure;
-loglog(h(valid_idx), L2errors(valid_idx), '-o', 'LineWidth', 1.4);
-xlabel('Element size h'); ylabel('L2 Error');
-if ~isnan(convRate)
+    loglog(h(valid_idx), L2errors(valid_idx), '-o', 'LineWidth', 1.4);
     title(sprintf('Convergence Rate (L2) pprox %.2f', convRate));
 else
+    loglog(h(valid_idx), L2errors(valid_idx), 'o', 'LineWidth', 1.4);
     title('Convergence Rate (L2) – insufficient data for fit');
 end
+xlabel('Element size h'); ylabel('L2 Error');
 grid on;
 
 %% Plot 2: Probe Point Convergence
