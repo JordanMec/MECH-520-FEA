@@ -1,0 +1,181 @@
+% convergenceStudy.m
+% Run mesh convergence study for 2D PM2.5 transient transport
+
+clear; clc;
+%% Parameters
+dt      = 1;      % time step [s]
+t_end   = 1000;   % total simulation time [s]
+inj_dur = 20;     % jet duration [s]
+ratio_xy = 4;     % mesh aspect ratio (nx/ny)
+flags.diff = 1;   % enable diffusion
+flags.adv  = 1;   % enable advection
+flags.turb = 1;   % enable turbulence
+
+%% Mesh sizes to test (nx values divisible by ratio_xy)
+meshSizes = [4, 8, 16, 32, 64, 128, 256];
+errors = nan(1, numel(meshSizes)-1);
+L2errors = nan(1, numel(meshSizes)-1);
+massResults = cell(1, numel(meshSizes));
+probeResults = zeros(numel(meshSizes), 1);
+finalFields = cell(1, numel(meshSizes));
+refCoords = [];
+refField = [];
+
+%% Loop over meshes
+for i = 1:numel(meshSizes)
+    nx = meshSizes(i);
+    ny = nx/ratio_xy;
+    [t, domain_mass, nu_final, coords] = runPMTransport(nx, ny, dt, t_end, inj_dur, flags);
+    massResults{i} = domain_mass;
+    finalFields{i} = nu_final;
+
+    % Track probe at center (2, 0.5)
+    probe = [2, 0.5];
+    [~, idx] = min(vecnorm(coords - probe, 2, 2));
+    probeResults(i) = nu_final(idx);
+
+    % Compute L2 error from finest mesh
+    if i == numel(meshSizes)
+        refField = nu_final;
+        refCoords = coords;
+    elseif i > 1 && ~isempty(refCoords)
+        % Interpolate coarser field to fine mesh
+        interp_u = griddata(coords(:,1), coords(:,2), nu_final, refCoords(:,1), refCoords(:,2), 'linear');
+        L2errors(i-1) = sqrt(sum((interp_u - refField).^2) / length(refField));
+    end
+
+    % Simple domain mass comparison (as fallback)
+    if i > 1
+        err = max(abs(domain_mass - massResults{i-1}));
+        errors(i-1) = err;
+    end
+end
+
+%% Plot 1: L2 Error vs Mesh Size (log-log)
+h = 1 ./ meshSizes(2:end);
+valid_idx = ~isnan(L2errors);~isnan(L2errors);
+
+if sum(valid_idx) >= 2
+    p = polyfit(log(h(valid_idx)), log(L2errors(valid_idx)), 1);
+    convRate = p(1);
+else
+    convRate = NaN;
+end
+
+figure;
+loglog(h(valid_idx), L2errors(valid_idx), '-o', 'LineWidth', 1.4);
+xlabel('Element size h'); ylabel('L2 Error');
+if ~isnan(convRate)
+    title(sprintf('Convergence Rate (L2) pprox %.2f', convRate));
+else
+    title('Convergence Rate (L2) – insufficient data for fit');
+end
+grid on;
+
+%% Plot 2: Probe Point Convergence
+figure;
+plot(meshSizes, probeResults, '-o', 'LineWidth', 1.4);
+xlabel('nx'); ylabel('Concentration at probe (2,0.5)');
+title('Probe Convergence'); grid on;
+
+%% Plot 3: Domain Mass Time Histories
+figure; hold on;
+colors = lines(numel(meshSizes));
+for j = 1:numel(meshSizes)
+    tvec = (0:length(massResults{j})-1)*dt;
+    plot(tvec, massResults{j}, '-', 'DisplayName', sprintf('nx = %d', meshSizes(j)), 'Color', colors(j,:));
+end
+xlabel('Time [s]'); ylabel('Total PM_{2.5} Mass');
+title('Domain Mass Over Time');
+legend show; grid on;
+
+%% Subfunction: runPMTransport
+function [t, domain_mass, nu, COORDS] = runPMTransport(nx, ny, dt, t_end, inj_dur, flags)
+
+D_diff0  = 1e-5;   D_turb0  = 1e-3;  v0       = 0.5;
+jet_conc = 500.4;  slot_w   = 0.10;  tau_turb = 120;
+cut_frac = 1e-4;  Lx       = 4;      Ly       = 1;
+u_amb   = 0;
+
+v_inflow = flags.adv * v0;
+D_turb0  = flags.turb * D_turb0;
+D_diff   = flags.diff * D_diff0;
+D_eff0   = D_diff + D_turb0;
+
+% Mesh
+xv = linspace(0, Lx, nx+1); yv = linspace(0, Ly, ny+1);
+[X, Y] = meshgrid(xv, yv);
+COORDS = [reshape(X.',[],1), reshape(Y.',[],1)];
+n_nodes = size(COORDS,1);
+
+% Elements
+elems = [];
+nodeMat = reshape(1:(nx+1)*(ny+1), nx+1, ny+1).';
+for j = 1:ny
+    for i = 1:nx
+        n1 = nodeMat(j,i);
+        elems(end+1,:) = [n1, n1+1, n1+nx+2, n1+nx+1];
+    end
+end
+
+slot_tol = 1e-8;
+inlet_nodes = find(abs(COORDS(:,1)) < slot_tol & abs(COORDS(:,2)-Ly/2)<=slot_w/2+slot_tol);
+corner = [0 0; Lx 0; Lx Ly; 0 Ly];
+exhaust_nodes = zeros(4,1);
+for cc = 1:4
+    exhaust_nodes(cc) = find(abs(COORDS(:,1)-corner(cc,1))<slot_tol & abs(COORDS(:,2)-corner(cc,2))<slot_tol);
+end
+
+Mg = sparse(n_nodes,n_nodes); Kg = Mg; Ag = Mg;
+GP = [-1 1]/sqrt(3); W = [1 1];
+for e = 1:size(elems,1)
+    idx = elems(e,:); cr = COORDS(idx,:); Ml=zeros(4); Kl=Ml; Al=Ml;
+    for a=1:2, for b=1:2
+        xi=GP(a); eta=GP(b);
+        N=0.25*[(1-xi)*(1-eta);(1+xi)*(1-eta);(1+xi)*(1+eta);(1-xi)*(1+eta)];
+        dNxi =0.25*[-(1-eta);(1-eta);(1+eta);-(1+eta)];
+        dNeta=0.25*[-(1-xi);-(1+xi);(1+xi);(1-xi)];
+        J=[dNxi';dNeta']*cr; detJ=det(J); invJ=inv(J); dN=invJ*[dNxi';dNeta'];
+        Ml=Ml+(N*N')*detJ*W(a)*W(b);
+        for p=1:4, for q=1:4
+          Kl(p,q)=Kl(p,q)+(dN(1,p)*dN(1,q)+dN(2,p)*dN(2,q))*D_eff0*detJ*W(a)*W(b);
+          Al(p,q)=Al(p,q)+N(p)*(v_inflow*dN(1,q))*detJ*W(a)*W(b);
+        end, end
+    end, end
+    Mg(idx,idx)=Mg(idx,idx)+Ml; Kg(idx,idx)=Kg(idx,idx)+Kl; Ag(idx,idx)=Ag(idx,idx)+Al;
+end
+
+n_steps = ceil(t_end/dt);
+t = (0:n_steps-1)*dt;
+domain_mass = zeros(n_steps,1);
+nu = zeros(n_nodes,1);
+node_area=sum(Mg,2);
+
+for n=1:n_steps
+    time = (n-1)*dt;
+    if time < inj_dur - eps
+        D_turb = D_turb0; v_eff = v_inflow;
+    else
+        D_turb = D_turb0 * exp(-(time-inj_dur)/tau_turb);
+        if D_turb/D_turb0 < cut_frac, D_turb = 0; end
+        v_eff = 0;
+    end
+    D_eff = D_diff + D_turb;
+    Kg_now = Kg*(D_eff/max(D_eff0,eps));
+    if v_eff>0, Ag_now=Ag*(v_eff/v_inflow); else, Ag_now=sparse(n_nodes,n_nodes); end
+    LHS=Mg/dt+0.5*(Ag_now+Kg_now); RHS=(Mg/dt-0.5*(Ag_now+Kg_now))*nu;
+    LHS(inlet_nodes,:)=0; LHS(sub2ind(size(LHS),inlet_nodes,inlet_nodes))=1;
+    if time < inj_dur - eps
+        RHS(inlet_nodes)=jet_conc;
+    else
+        RHS(inlet_nodes)=u_amb;
+    end
+    if time < inj_dur - eps
+        LHS(exhaust_nodes,:)=0;
+        LHS(sub2ind(size(LHS),exhaust_nodes,exhaust_nodes))=1;
+        RHS(exhaust_nodes)=u_amb;
+    end
+    nu = LHS \ RHS;
+    domain_mass(n)=node_area'*nu;
+end
+end
